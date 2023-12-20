@@ -23,7 +23,7 @@ GT honor code violation.
 
 Student Name: Tucker Balch (replace with your name)                                                                                  
 GT User ID: amckay33 (replace with your User ID)                                                                                
-GT ID: 903853993 (replace with your GT ID)                                                                                  
+GT ID: xxxxxxxxx (replace with your GT ID)                                                                                  
 """
 
 import datetime as dt
