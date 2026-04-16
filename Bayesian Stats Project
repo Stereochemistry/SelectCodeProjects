@@ -1,0 +1,179 @@
+import numpy as np
+import pandas as pd
+import pymc as pm
+import seaborn as sb
+import matplotlib.pyplot as plt
+import arviz as az
+import pytensor as pt
+import logging
+
+def main():
+
+    # Generate Random Data Set
+    sample_size = 100
+
+    # Define All Input Parameters
+    t_ref = 1000
+    h = 85
+    E = 0.87
+    K = 8.617e-5
+    d = 358.1
+
+    # Create Data Set based on realistic data
+    temperatures = np.random.normal(loc=300, scale=1, size=sample_size)
+    humidities = np.random.normal(loc=50, scale=5, size=sample_size)
+    strengths = np.random.normal(loc=200, scale=10, size=sample_size)
+
+
+    df = pd.DataFrame({
+        'Temperature (K)': temperatures,
+        'Humidity (%)': humidities,
+        'Strength (N)': strengths
+    })
+
+    # Find correlation coefficient between temperature and humidity, and corrosion time and time to failure
+    p_corr = df['Temperature (K)'].corr(df['Humidity (%)'])
+
+    # Generate Error Message when Model Fails
+    pt.config.exception_verbosity = 'high'
+
+    # Generate Model
+    with pm.Model() as model:
+        # Define Priors on Corrosion Aspect of Model
+        T = pm.Normal('Temperature', mu=np.mean(df['Temperature (K)']), sigma=np.std(df['Temperature (K)']),
+                      shape=len(df), observed=df['Temperature (K)'])
+        H = pm.Normal('Humidity', mu=(np.mean(df['Humidity (%)']) + p_corr * (np.std(df['Humidity (%)'])/np.std(df['Temperature (K)']) \
+                                                                  * (T - np.mean(df['Temperature (K)'])))), sigma=np.std(df['Humidity (%)']),
+                      shape=len(df),
+                      observed=df['Humidity (%)'])
+
+        # Define Priors on Strength and Load
+        S = pm.Normal('Strength', mu=strengths, sigma=15, shape=len(df), observed=df['Strength (N)'])
+        L = pm.Normal('Loads', mu=50, sigma=25, shape=(len(df), np.random.randint(10, 100))) # Generate n loads per tool
+        S_exp = S[:, np.newaxis]
+
+        # Define relevant variables for Breakage Time
+        v = pm.Uniform('v', 0.001, 1)
+        y = pm.Exponential('y', lam=v, shape=len(df))
+        t = pm.Deterministic('t', pm.math.cumsum(y))
+        breakage = pm.math.sum(L > S_exp, axis=1) > 0
+
+        # Define the corrosion time
+        t_corrosion = pm.Deterministic("Corrosion Time", t_ref * (h / H) ** 3 * np.exp(-E / K * (1 / T - 1 / d)))
+        t_breakage = pm.Deterministic("Breakage Time", pm.math.switch(breakage, t, np.full_like(t, 100, dtype='float64')))
+
+        # Determine correlation coefficient, if any
+        p_failure = pm.Normal('Correlation Coefficient', mu=0.5, sigma=0.05)
+
+        # Combine the two times
+        t_combined = pm.Deterministic("Combined Time", t_corrosion * (1 - np.sqrt(p_failure**2)) + t_breakage * np.sqrt(p_failure**2))
+
+        # Model the Final Breakage Time
+        alpha = pm.Normal("alpha", 1.0, 0.1)
+        beta = pm.Deterministic("beta", pm.math.exp(pm.math.mean(pm.math.log(t_combined))))  # A deterministic estimate for scale based on log-average of combined times
+        t_final = pm.Weibull("Failure Time", alpha=alpha, beta=beta, shape=len(df))
+
+        # Sample from the model
+        # Start Log
+        logging.info("Starting Sampling")
+
+        try:
+            trace = pm.sample(2000, tune=1000, target_accept=0.85, return_inferencedata=True, progressbar=True)
+        except Exception as e:
+            print(f"Error Occurred: {e}")
+            trace = None
+
+        logging.info("Sampling completed")
+
+
+    # Summarize Final Time based on Corrosion and Breakage Times
+    summary_failure = az.summary(trace, var_names=["Failure Time", "Combined Time", "Breakage Time", "Corrosion Time"])
+    summary_stats = az.summary(trace, kind='stats')
+
+    print(summary_failure)
+    print(summary_stats)
+
+
+    # Find the Weighted General Entropy Loss Function of the t_final Weibull distribution
+    with model:
+        ppc = pm.sample_posterior_predictive(trace, var_names=["alpha", "beta", "Strength", "Temperature",
+                                                               "Humidity", "Failure Time", "Combined Time",
+                                                               "Breakage Time", "Corrosion Time",
+                                                               "Correlation Coefficient"])
+
+    ppc_samples = ppc.posterior_predictive
+
+    temperature_samples = ppc_samples["Temperature"]
+    humidity_samples = ppc_samples["Humidity"]
+    strength_samples = ppc_samples["Strength"]
+    t_corrosion_samples = ppc_samples["Corrosion Time"]
+    t_breakage_samples = ppc_samples["Breakage Time"]
+    t_combined_samples = ppc_samples["Combined Time"]
+    t_final_samples = ppc_samples["Failure Time"]
+    correlation_samples = ppc_samples["Correlation Coefficient"]
+
+    # Remove outliers from corrosion
+    t_corrosion_samples = np.clip(t_corrosion_samples, None, 5000)
+
+    # Return mean and standard deviation of final times
+    mean_failure = t_final_samples.mean().values.tolist()
+    mean_combined = t_combined_samples.mean().values.tolist()
+    mean_corrosion = t_corrosion_samples.mean().values.tolist()
+    mean_breakage = t_breakage_samples.mean().values.tolist()
+
+    std_failure = t_final_samples.std().values.tolist()
+    std_combined = t_combined_samples.std().values.tolist()
+    std_corrosion = t_corrosion_samples.std().values.tolist()
+    std_breakage = t_breakage_samples.std().values.tolist()
+
+    print(f"Average Tool Failure Time: {mean_failure} +/- {std_failure}")
+    print(f"Average Tool Failure Time: {mean_combined} +/- {std_combined}")
+    print(f"Average Tool Corrosion Time: {mean_corrosion} +/- {std_corrosion}")
+    print(f"Average Tool Breakage Time: {mean_breakage} +/- {std_breakage}")
+
+
+    # Visualize Final Time as a Function of Corrosion Time and Breakage Time
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.scatter(t_corrosion_samples, t_breakage_samples, t_combined_samples, c=t_combined_samples, cmap='viridis')
+    ax.set_xlabel('Corrosion Time (hours)')
+    ax.set_ylabel('Breakage Time (hours)')
+    ax.set_zlabel('Final Time (hours)')
+    plt.title('Final Time as a Function of Corrosion and Breakage Times')
+    plt.show()
+
+    # Visualize Corrosion Time as a Function of Temperature and Humidity
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.scatter(temperature_samples, humidity_samples, t_corrosion_samples, c=t_corrosion_samples, cmap='viridis')
+    ax.set_xlabel('Temperature (K)')
+    ax.set_ylabel('Humidity (%)')
+    ax.set_zlabel('Corrosion Time (Hours)')
+    plt.title('Final Time as a Function of Corrosion and Breakage Times')
+    plt.show()
+
+
+    # Generate a Heatmap to Find Relationships Between Time to Failure and all Input Variables in Original Data Set
+    mean_failure_times = np.mean(t_combined_samples, axis=0)
+    mean_temperatures = np.mean(temperature_samples, axis=0)
+    mean_humidities = np.mean(humidity_samples, axis=0)
+    mean_strengths = np.mean(strength_samples, axis=0)
+
+    dfm = pd.DataFrame({
+        'Temperature (K)': mean_temperatures[0, :100],
+        'Humidity (%)': mean_humidities[0, :100],
+        'Strength (N)': mean_strengths[0, :100],
+        'Failure Time (thousands of hours)': mean_failure_times[0, :100]
+    })
+
+    corr = dfm.corr()
+    print(corr)
+
+    sb.heatmap(corr, annot=True, cmap='coolwarm', fmt='.2f')
+    plt.title('Heatmap of Dataset and Predicted Time of Failure from Model')
+    plt.show()
+
+if __name__ == '__main__':
+    main()
