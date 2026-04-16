@@ -1,0 +1,280 @@
+import pymc as pm
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import arviz as az
+import seaborn as sb
+
+def main():
+    # Question 1: Effects of Gamma Radiation
+    # 1.1: Generate MCMC Sample
+
+    # Import CSV and Define Variables
+    rad_data = pd.read_csv('Data/dicentric.csv')
+    y = rad_data["y"]
+    x_cells = rad_data["m"]
+    x_dose = rad_data["d"]
+    x_rate = rad_data["r"]
+
+    # Define appropriate value for lambda based on dose rate
+    lam_param = 1/(x_rate.mean()/x_rate.sum())
+
+    # Generate Model
+    with pm.Model() as m1:
+        Xm = pm.Data("x_cells", x_cells, mutable=True)
+        Xd = pm.Data("x_dose", x_dose, mutable=True)
+        Xr = pm.Data("x_rate", x_rate, mutable=True)
+        y_data = pm.Data("y_data", y, mutable=False)
+
+        # Define Non-informative Priors, Known to Be Positive
+        alpha = pm.Exponential("alpha", lam=lam_param)
+        theta_1 = pm.Exponential("theta_1", lam=lam_param)
+        theta_2 = pm.Exponential("theta_2", lam=lam_param)
+
+        # Define Lambda Prior
+        lam_raw = pm.Deterministic("lambda", alpha * Xd + (theta_1 + theta_2 * pm.math.log(Xr)) * Xd**2)
+        lam = pm.math.maximum(lam_raw, 0)
+
+        # Define Mu
+        mu = lam * Xm
+
+        # Define Poisson Posterior
+        y_obs = pm.Poisson("y", mu=mu, observed=y_data)
+
+        start_values = {"alpha_log__": np.log(1),
+                        "theta_1_log__": np.log(1),
+                        "theta_2_log__": np.log(1)}
+
+        # Discard First 1000 of 10000 Samples
+        trace1a = pm.sample(10000, start=start_values, tune=1000, target_accept=0.99, return_inferencedata=True)
+
+    # Summarize Results
+    summary_1a = az.summary(trace1a, kind='stats')
+    print(summary_1a)
+
+    # Find Posterior Samples
+    with m1:
+        ppc = pm.sample_posterior_predictive(trace1a, var_names=["y", "alpha", "theta_1", "theta_2"])
+
+    ppc_samples = ppc.posterior_predictive
+    abnormality_samples = ppc_samples["y"].values.reshape(4 * 10000, 27).mean(axis=1)
+    alpha_samples = ppc_samples["alpha"].values.flatten()
+    theta_1_samples = ppc_samples["theta_1"].values.flatten()
+    theta_2_samples = ppc_samples["theta_2"].values.flatten()
+
+    # Create DataFrame with these flattened arrays
+    ppc_data = pd.DataFrame({
+        "alpha": alpha_samples,
+        "theta_1": theta_1_samples,
+        "theta_2": theta_2_samples,
+        "y": abnormality_samples
+        })
+
+    # Create Pair Plot
+    sb.pairplot(ppc_data)
+    plt.show()
+
+    # 1.2: Find Posterior Mean and 95% Credible Sets for Priors, and Plot Results
+    # Find Posterior Mean and Standard Deviation for Each Prior
+    abnormality_mean = abnormality_samples.mean().tolist()
+    abnormality_std = abnormality_samples.std().tolist()
+
+    alpha_mean = alpha_samples.mean().tolist()
+    alpha_std = alpha_samples.std().tolist()
+
+    theta_1_mean = theta_1_samples.mean().tolist()
+    theta_1_std = theta_1_samples.std().tolist()
+
+    theta_2_mean = theta_2_samples.mean().tolist()
+    theta_2_std = theta_2_samples.std().tolist()
+
+    # Find 95% Credible Set for each Prior
+    alpha_cs = np.percentile(ppc_samples["alpha"], [2.5, 97.5])
+    theta_1_cs = np.percentile(ppc_samples["theta_1"], [2.5, 97.5])
+    theta_2_cs = np.percentile(ppc_samples["theta_2"], [2.5, 97.5])
+    abnormal_cs = np.percentile(ppc_samples["y"], [2.5, 97.5])
+
+    # Show Results
+    print(f"Posterior Mean and Standard Deviation of Chromosomal Abnormalities: {abnormality_mean} +/- {abnormality_std} with a 95% CS of {abnormal_cs}")
+    print(f"Posterior Mean and Standard Deviation of Lambda: {alpha_mean} +/- {alpha_std} with a 95% CS of {alpha_cs}")
+    print(f"Posterior Mean and Standard Deviation of Cell Number: {theta_1_mean} +/- {theta_1_std} with a 95% CS of {theta_1_cs}")
+    print(f"Posterior Mean and Standard Deviation of Cell Number: {theta_2_mean} +/- {theta_2_std} with a 95% CS of {theta_2_cs}")
+
+    # 1.3: Predict Abnormality Results from Dose of 2.0 and Rate of 2.5
+    # Find with Model
+    with m1:
+        Xd_new = 2.0
+        Xr_new = 2.5
+
+        lambda_new = pm.Deterministic("lambda_new", alpha * Xd_new + (theta_1 + theta_2 * pm.math.log(Xr_new)) * Xd_new**2)
+        lam_new = pm.math.maximum(lambda_new, 0)
+        mu_new = lam_new * Xm
+
+        y_new = pm.Poisson("y_new", mu=mu_new, observed=y_data)
+
+        trace1b = pm.sample(10000, tune=1000, start=start_values, target_accept=0.99, return_inferencedata=True)
+
+    with m1:
+        ppc_new = pm.sample_posterior_predictive(trace1b, var_names=["y_new"])
+
+    # Find Mean and 95% Credible Set
+    ppc_new_samples = ppc_new.posterior_predictive
+    y_new_samples = ppc_new_samples["y_new"]
+
+    y_new_mean = y_new_samples.mean().values.tolist()
+    y_new_std = y_new_samples.std().values.tolist()
+    y_new_cs = np.percentile(y_new_samples, [2.5, 97.5])
+
+    print(f"Number of Chromosomal Abnormalities Predicted to be {y_new_mean} +/- {y_new_std} with a 95% Credible Set of {y_new_cs}")
+
+
+    # Question 2: Plants of the Galápagos Islands
+    # Standardize All Variables
+    def standardize(X_df: pd.DataFrame) -> pd.DataFrame:
+        # Find means and std. dev.'s, then standardize
+        means = X_df.mean(axis=0)
+        stddevs = X_df.std(axis=0)
+        X_standardized = (X_df - means) / stddevs
+
+        return X_standardized
+
+
+    # Import CSV and define variables
+    plant_data = pd.read_csv('Data/gala.csv')
+    print(plant_data.head())
+
+    y = plant_data.iloc[:, 1]
+    X_raw = plant_data.iloc[:, 2:]
+
+    # Replace Empty Values in Elevation Column with NaN
+    X_raw["Elevation"].replace("", np.nan, inplace=True)
+
+    # Separate Observed from Missing Values
+    X_obs = X_raw["Elevation"].dropna().values
+    X_missing = X_raw["Elevation"].isna()
+    num_missing = int(X_missing.sum())
+
+    # Fill in NaN Values for Now
+    X_complete = X_raw.fillna(X_obs.mean())
+    X = standardize(X_complete)
+
+    with pm.Model() as m2:
+        # Impute Missing Data and Fill NaN for Now
+        X_imp = pm.Exponential("X Imputed", lam=1/425, shape=num_missing)
+
+        # Define Data
+        y_data = pm.Data("y Data", y, mutable=False)
+        X_data = pm.Data("X Data", X, mutable=True)
+
+        # Define Priors
+        alpha = pm.Normal("alpha", mu=0, sigma=10)
+        betas = pm.Normal("betas", mu=0, sigma=5, shape=X.shape[1])
+
+        # Log-link variables
+        mu = pm.math.exp(alpha + pm.math.dot(X_data, betas))
+
+        # Define Distribution
+        y_obs = pm.Poisson("Species", mu=mu, observed=y_data)
+
+        trace2a = pm.sample(10000, tune=1000, target_accept=0.99, return_inferencedata=True)
+
+    # Replace NaN's with true imputed values
+    imputed_vals = np.mean(trace2a.posterior["X Imputed"].values, axis=(0, 1))
+    X_complete.loc[X_missing, "Elevation"] = imputed_vals
+    X_new = standardize(X_complete)
+
+
+    with m2:
+        # Update Data with Imputed Values
+        pm.set_data({"X Data": X_new})
+
+        # Find Posterior Valeus Again
+        trace2b = pm.sample(10000, tune=1000, target_accept=0.99, return_inferencedata=True)
+
+        # Sample From New Posterior
+        ppc_plants = pm.sample_posterior_predictive(trace2b,
+                                                    var_names=["Species", "X Data"])
+
+    summary2 = az.summary(trace2b, kind="stats")
+    print(summary2)
+
+    # Find Mean Species Amount
+    plant_samples = ppc_plants.posterior_predictive
+    species_samples = plant_samples["Species"].values
+
+    species_mean = species_samples.mean().tolist()
+    species_std = species_samples.std().tolist()
+
+    print(f"Expected Value for Species: {species_mean} +/- {species_std}")
+
+
+    # Question 3: Multi-Regression Model of Life Expectancy
+    # 3.1: Multiple Regression Model
+
+    # Import data set and define variables
+    LE_data = pd.read_csv('Data/state.csv')
+    LE_data = LE_data.drop(LE_data.columns[[0]], axis=1)
+    y = LE_data["Life.Exp"]
+    X = LE_data.drop("Life.Exp", axis=1)
+
+    # Create the Linear Regression Model
+    with pm.Model() as m3:
+        # Define Data
+        X_data = pm.Data("X Data", X, mutable=True)
+        y_data = pm.Data("y data", y, mutable=False)
+
+        # Define Priors
+        alpha = pm.Normal("Alpha", mu=0, tau=0.0001)
+        betas = pm.Normal("betas", mu=0, tau=0.1, shape=X.shape[1])
+
+        # Find Posterior
+        mu = alpha + pm.math.dot(X_data, betas)
+        y_obs = pm.Normal("y_obs", mu=mu, observed=y_data)
+
+        # Trace and Sample
+        trace3a = pm.sample(10000, tune=1000, target_accept=0.99, return_inferencedata=True)
+        ppc_LE = pm.sample_posterior_predictive(trace3a)
+
+    summary3a = az.summary(trace3a, hdi_prob=0.95)
+    summary3b = az.summary(trace3a, kind='stats')
+    print(summary3a)
+    print(summary3b)
+
+    # 3.3: SSVS Calculations
+    X_np = X.to_numpy()
+    X_centered = (X_np - X_np.mean(axis=0)) / X_np.std(axis=0)
+
+    _, p = X.shape
+    draws = 10000
+    chains = 4
+
+    # Create SSVS Model
+    with pm.Model() as m3_ssvs:
+        # Define Priors
+        delta = pm.Bernoulli("delta", p=0.5, shape=p)
+        alpha = pm.Normal("alpha", 0, tau=0.1, shape=p)
+        beta = pm.Deterministic("beta", delta * alpha)
+        tau = pm.Gamma("tau", 0.1, 0.1)
+        intercept = pm.Normal("intercept", 0, tau=0.0001)
+
+        # Define Likelihood
+        mu = intercept + pm.math.dot(X_centered, beta)
+        pm.Normal("Likelihood", mu, tau=tau, observed=y)
+
+        trace3b = pm.sample(draws=draws, chains=chains, target_accept=0.99)
+
+    summary3c = az.summary(trace3b, var_names="delta", kind="stats")
+    print(summary3c)
+    print(trace3b.posterior.delta)
+
+    # Find Likelihood of each Model
+    rows = chains * draws
+    deltas = trace3b.posterior.delta.to_numpy()
+    models, counts = np.unique(deltas.reshape((rows, p)), axis=0, return_counts=True)
+
+    for model, count in zip(models, counts):
+        print(f"{model}: likelihood = {count/rows:.3f}")
+
+
+if __name__ == '__main__':
+    main()
