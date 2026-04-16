@@ -1,0 +1,94 @@
+# -*- coding: utf-8 -*-
+
+import pymc as pm
+import numpy as np
+import arviz as az
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def deaggregate(x, y, n):
+    """
+    Transform "Binomial" data to "Bernoulli" data by deaggregation.
+    """
+    no_response = n - y
+
+    x_response = np.repeat(x, y)
+    x_no_response = np.repeat(x, no_response)
+
+    y_col = np.concatenate(
+        (np.ones(x_response.shape[0]), np.zeros(x_no_response.shape[0]))
+    )
+
+    x_col = np.concatenate((x_response, x_no_response))
+
+    return pd.DataFrame({"y": y_col, "x": x_col})
+
+def bernoulli_version(deaggregated_df):
+    x = deaggregated_df.x.to_numpy()
+    y = deaggregated_df.y.to_numpy()
+
+    with pm.Model() as m:
+        x_data = pm.Data("x_data", x, mutable=True)
+
+        beta0 = pm.Normal("beta0", 0, tau=0.001)
+        beta1 = pm.Normal("beta1", 0, tau=0.001)
+
+        p = beta0 + x_data * beta1
+
+        pm.Bernoulli("likelihood", logit_p=p, observed=y)
+
+        x_pred = 2.5
+
+        p_pred = pm.Deterministic("p_pred", pm.math.invlogit(beta0 + x_pred * beta1))
+        trace = pm.sample(3000)
+
+    print("Bernoulli results:\n")
+    print(az.summary(trace, hdi_prob=.95))
+
+def binomial_version(x, y, n):
+    with pm.Model() as m:
+        x_data = pm.Data("x_data", x, mutable=True)
+
+        beta0 = pm.Normal("beta0", 0, tau=0.001)
+        beta1 = pm.Normal("beta1", 0, tau=0.001)
+
+        p = beta0 + x_data * beta1
+
+        pm.Binomial("likelihood", logit_p=p, n=n, observed=y)
+
+        x_pred = 2.5
+
+        p_pred = pm.Deterministic("p_pred", pm.math.invlogit(beta0 + x_pred * beta1))
+        trace = pm.sample(3000)
+
+    print("Binomial results:\n")
+    print(az.summary(trace, hdi_prob=.95))
+
+
+    az.summary(trace, hdi_prob=0.95)
+
+if __name__ == '__main__':
+    # create data
+    x = np.arange(0, 6, dtype=float)
+    y = np.array([0, 9, 21, 47, 60, 63])
+    n = np.repeat(70, x.shape)
+
+    # bernoulli data
+    deaggregated_df = deaggregate(x, y, n)
+    bernoulli_version(deaggregated_df)
+    binomial_version(x, y, n)
+
+
+# Results
+
+# Bernoulli
+#          mean     sd  hdi_2.5%  hdi_97.5%  mcse_mean  mcse_sd  ess_bulk  ess_tail  r_hat
+# beta0  -3.333  0.329    -3.970     -2.698      0.006    0.004    3227.0    3254.0    1.0
+# beta1   1.258  0.114     1.039      1.473      0.002    0.001    3240.0    3442.0    1.0
+# p_pred  0.454  0.034     0.386      0.520      0.000    0.000    8712.0    8651.0    1.0
+
+# Binomial
+#          mean     sd  hdi_2.5%  hdi_97.5%  mcse_mean  mcse_sd  ess_bulk  ess_tail  r_hat
+# beta0  -3.341  0.329    -3.998     -2.712      0.006    0.004    3278.0    2983.0    1.0
+# beta1   1.261  0.113     1.046      1.490      0.002    0.001    3325.0    2863.0    1.0
+# p_pred  0.453  0.034     0.389      0.521      0.000    0.000    8753.0    7952.0    1.0
